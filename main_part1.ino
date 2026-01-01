@@ -22,6 +22,10 @@
 // GPIO untuk wake-up eksternal (contoh: sensor getar / PIR)
 #define WAKE_GPIO GPIO_NUM_13
 
+// Resolusi frame QQVGA
+#define FRAME_WIDTH  160
+#define FRAME_HEIGHT 120
+
 // ============================================================
 // ---------- Otsu Threshold Function ----------
 uint8_t calculateOtsuThreshold(uint8_t *data, size_t len) {
@@ -81,6 +85,108 @@ void applyThreshold(uint8_t *data, size_t len, uint8_t threshold) {
   }
 }
 
+// ---------- Analisis Distribusi Vertikal ----------
+typedef struct {
+  float topHalfRatio;      // Rasio piksel putih di setengah atas
+  float bottomHalfRatio;   // Rasio piksel putih di setengah bawah
+  float verticalSpread;    // Sebaran vertikal (tinggi objek)
+  int centerOfMassY;       // Pusat massa vertikal (dalam piksel)
+  bool isStanding;         // Status: berdiri atau tidak
+  float confidence;        // Tingkat kepercayaan (0-100%)
+} PostureAnalysis;
+
+PostureAnalysis analyzePosture(uint8_t *data, int width, int height) {
+  PostureAnalysis result = {0};
+  
+  // Array untuk menghitung piksel putih per baris
+  uint16_t rowWhiteCount[FRAME_HEIGHT] = {0};
+  uint32_t totalWhite = 0;
+  
+  // Hitung piksel putih per baris
+  for (int y = 0; y < height; y++) {
+    for (int x = 0; x < width; x++) {
+      int idx = y * width + x;
+      if (data[idx] == 255) {
+        rowWhiteCount[y]++;
+        totalWhite++;
+      }
+    }
+  }
+  
+  // Jika tidak ada objek terdeteksi
+  if (totalWhite < 100) {
+    result.isStanding = false;
+    result.confidence = 0;
+    return result;
+  }
+  
+  // --- Analisis Setengah Atas vs Bawah ---
+  uint32_t topHalfWhite = 0;
+  uint32_t bottomHalfWhite = 0;
+  int midHeight = height / 2;
+  
+  for (int y = 0; y < midHeight; y++) {
+    topHalfWhite += rowWhiteCount[y];
+  }
+  for (int y = midHeight; y < height; y++) {
+    bottomHalfWhite += rowWhiteCount[y];
+  }
+  
+  result.topHalfRatio = (float)topHalfWhite / totalWhite * 100;
+  result.bottomHalfRatio = (float)bottomHalfWhite / totalWhite * 100;
+  
+  // --- Hitung Center of Mass Vertikal ---
+  uint32_t sumY = 0;
+  for (int y = 0; y < height; y++) {
+    sumY += y * rowWhiteCount[y];
+  }
+  result.centerOfMassY = sumY / totalWhite;
+  
+  // --- Hitung Vertical Spread (tinggi objek) ---
+  int firstRow = -1, lastRow = -1;
+  for (int y = 0; y < height; y++) {
+    if (rowWhiteCount[y] > 0) {
+      if (firstRow == -1) firstRow = y;
+      lastRow = y;
+    }
+  }
+  result.verticalSpread = (float)(lastRow - firstRow) / height * 100;
+  
+  // --- LOGIKA DETEKSI POSISI ---
+  // Berdiri: objek lebih tinggi secara vertikal
+  // Horizontal: objek lebih rendah dan tersebar horizontal
+  
+  float aspectScore = 0;
+  
+  // 1. Vertical spread tinggi = kemungkinan berdiri
+  if (result.verticalSpread > 60) {
+    aspectScore += 40;
+  } else if (result.verticalSpread > 40) {
+    aspectScore += 20;
+  }
+  
+  // 2. Distribusi merata vertikal = berdiri
+  float verticalBalance = 100 - abs(result.topHalfRatio - result.bottomHalfRatio);
+  if (verticalBalance > 70) {
+    aspectScore += 30;
+  } else if (verticalBalance > 50) {
+    aspectScore += 15;
+  }
+  
+  // 3. Center of mass di tengah atau atas = berdiri
+  float centerRatio = (float)result.centerOfMassY / height;
+  if (centerRatio > 0.3 && centerRatio < 0.7) {
+    aspectScore += 30;
+  } else if (centerRatio < 0.3) {
+    aspectScore += 20; // Sangat di atas = berdiri
+  }
+  
+  result.confidence = aspectScore;
+  result.isStanding = (aspectScore > 50);
+  
+  return result;
+}
+
 // ---------- Deep Sleep Function ----------
 void goToDeepSleep(uint64_t sleep_seconds) {
   Serial.println("Masuk deep sleep...");
@@ -125,7 +231,7 @@ bool initCamera() {
   return true;
 }
 
-// ---------- Proses Frame dengan Otsu ----------
+// ---------- Proses Frame dengan Analisis Postur ----------
 void processFrame(camera_fb_t *fb) {
   // Hitung rata-rata intensitas
   uint32_t sum = 0;
@@ -154,9 +260,45 @@ void processFrame(camera_fb_t *fb) {
   Serial.print(whiteRatio);
   Serial.println("%");
   
-  // Di sinilah nanti tambahkan:
-  // - deteksi siluet
-  // - cek posisi berdiri berdasarkan piksel putih
+  // === ANALISIS POSTUR ===
+  Serial.println("\n=== ANALISIS POSTUR ===");
+  PostureAnalysis posture = analyzePosture(fb->buf, FRAME_WIDTH, FRAME_HEIGHT);
+  
+  Serial.print("Distribusi Atas: ");
+  Serial.print(posture.topHalfRatio, 1);
+  Serial.println("%");
+  
+  Serial.print("Distribusi Bawah: ");
+  Serial.print(posture.bottomHalfRatio, 1);
+  Serial.println("%");
+  
+  Serial.print("Sebaran Vertikal: ");
+  Serial.print(posture.verticalSpread, 1);
+  Serial.println("%");
+  
+  Serial.print("Center of Mass Y: ");
+  Serial.print(posture.centerOfMassY);
+  Serial.print(" px (");
+  Serial.print((float)posture.centerOfMassY / FRAME_HEIGHT * 100, 1);
+  Serial.println("%)");
+  
+  Serial.print("\nStatus: ");
+  if (posture.isStanding) {
+    Serial.println("BERDIRI");
+  } else {
+    Serial.println("HORIZONTAL/JATUH");
+  }
+  
+  Serial.print("Confidence: ");
+  Serial.print(posture.confidence, 1);
+  Serial.println("%");
+  Serial.println("========================\n");
+  
+  // Trigger aksi jika terdeteksi jatuh
+  if (!posture.isStanding && posture.confidence > 30) {
+    Serial.println("⚠️ ALERT: Kemungkinan jatuh terdeteksi!");
+    // Tambahkan aksi: kirim notifikasi, nyalakan alarm, dll
+  }
 }
 
 // ============================================================
