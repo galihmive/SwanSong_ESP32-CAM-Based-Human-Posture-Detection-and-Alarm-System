@@ -2,8 +2,8 @@
 #include <WiFi.h>
 
 // Ganti sesuai WiFi Anda
-const char* ssid = "test";
-const char* password = "test";
+const char* ssid = "iothell";
+const char* password = "25082007";
 
 // Pin untuk ESP32-CAM AI Thinker
 #define PWDN_GPIO_NUM     32
