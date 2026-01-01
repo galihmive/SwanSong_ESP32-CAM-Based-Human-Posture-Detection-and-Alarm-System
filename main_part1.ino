@@ -1,3 +1,14 @@
+typedef struct {
+  float topHalfRatio;      // Rasio piksel putih di setengah atas
+  float bottomHalfRatio;   // Rasio piksel putih di setengah bawah
+  float verticalSpread;    // Sebaran vertikal (tinggi objek)
+  int centerOfMassY;       // Pusat massa vertikal (dalam piksel)
+  bool isStanding;         // Status: berdiri atau tidak
+  float confidence;        // Tingkat kepercayaan (0-100%)
+}PostureAnalysis;
+
+PostureAnalysis analyzePosture(uint8_t *data, int width, int height);
+
 #include "esp_camera.h"
 #include "esp_sleep.h"
 
@@ -86,15 +97,16 @@ void applyThreshold(uint8_t *data, size_t len, uint8_t threshold) {
 }
 
 // ---------- Analisis Distribusi Vertikal ----------
-typedef struct {
-  float topHalfRatio;      // Rasio piksel putih di setengah atas
-  float bottomHalfRatio;   // Rasio piksel putih di setengah bawah
-  float verticalSpread;    // Sebaran vertikal (tinggi objek)
-  int centerOfMassY;       // Pusat massa vertikal (dalam piksel)
-  bool isStanding;         // Status: berdiri atau tidak
-  float confidence;        // Tingkat kepercayaan (0-100%)
-} PostureAnalysis;
+// typedef struct {
+//   float topHalfRatio;      // Rasio piksel putih di setengah atas
+//   float bottomHalfRatio;   // Rasio piksel putih di setengah bawah
+//   float verticalSpread;    // Sebaran vertikal (tinggi objek)
+//   int centerOfMassY;       // Pusat massa vertikal (dalam piksel)
+//   bool isStanding;         // Status: berdiri atau tidak
+//   float confidence;        // Tingkat kepercayaan (0-100%)
+// }PostureAnalysis;
 
+// PostureAnalysis analyzePosture(uint8_t *data, int width, int height);
 PostureAnalysis analyzePosture(uint8_t *data, int width, int height) {
   PostureAnalysis result = {0};
   
@@ -296,7 +308,7 @@ void processFrame(camera_fb_t *fb) {
   
   // Trigger aksi jika terdeteksi jatuh
   if (!posture.isStanding && posture.confidence > 30) {
-    Serial.println("⚠️ ALERT: Kemungkinan jatuh terdeteksi!");
+    Serial.println("⚠️ ALERT: Kemungkinan Tidur Terdeteksi!");
     // Tambahkan aksi: kirim notifikasi, nyalakan alarm, dll
   }
 }
@@ -306,30 +318,46 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   
-  esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
-  Serial.print("Wakeup cause: ");
-  Serial.println(cause);
+  // esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+  // Serial.print("Wakeup cause: ");
+  // Serial.println(cause);
   
   pinMode(WAKE_GPIO, INPUT);
   
   if (!initCamera()) {
-    goToDeepSleep(30);
+    Serial.println("Camera gagal init, berhenti");
+    while (1) delay(1000);
+    // goToDeepSleep(30);
   }
   
   camera_fb_t *fb = esp_camera_fb_get();
   if (!fb) {
     Serial.println("Capture gagal");
-    goToDeepSleep(30);
+    // goToDeepSleep(30);
   }
   
   processFrame(fb);
   
   esp_camera_fb_return(fb);
+
+  Serial.println("Camera siap. Mulai analisis...");
   
   // Tidur 60 detik atau sampai GPIO aktif
-  goToDeepSleep(60);
+  // goToDeepSleep(60);
 }
 
 void loop() {
-  // Tidak dipakai
+  camera_fb_t *fb = esp_camera_fb_get();
+  if (!fb) {
+    Serial.println("Capture gagal");
+    delay(3000);
+    return;
+  }
+
+  processFrame(fb);
+
+  esp_camera_fb_return(fb);
+
+  Serial.println("Menunggu 3 detik...\n");
+  delay(3000);
 }
