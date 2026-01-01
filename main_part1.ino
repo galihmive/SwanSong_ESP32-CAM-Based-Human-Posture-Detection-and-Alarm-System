@@ -5,7 +5,7 @@ typedef struct {
   int centerOfMassY;       // Pusat massa vertikal (dalam piksel)
   bool isStanding;         // Status: berdiri atau tidak
   float confidence;        // Tingkat kepercayaan (0-100%)
-}PostureAnalysis;
+} PostureAnalysis;
 
 PostureAnalysis analyzePosture(uint8_t *data, int width, int height);
 
@@ -36,6 +36,32 @@ PostureAnalysis analyzePosture(uint8_t *data, int width, int height);
 // Resolusi frame QQVGA
 #define FRAME_WIDTH  160
 #define FRAME_HEIGHT 120
+
+// ============== Buffer Multi-Frame untuk Tracking ==============
+#define FRAME_HISTORY_SIZE 5  // Simpan 5 frame terakhir
+
+typedef struct {
+  int centerOfMassY;
+  float topHalfRatio;
+  float bottomHalfRatio;
+  float verticalSpread;
+  unsigned long timestamp;
+} FrameHistory;
+
+FrameHistory frameBuffer[FRAME_HISTORY_SIZE];
+int frameIndex = 0;
+int frameCount = 0;
+
+// Status postur
+enum PostureState {
+  STATE_UNKNOWN,
+  STATE_STANDING,
+  STATE_TRANSITIONING,
+  STATE_SLEEPING
+};
+
+PostureState currentState = STATE_UNKNOWN;
+unsigned long stateStartTime = 0;
 
 // ============================================================
 // ---------- Otsu Threshold Function ----------
@@ -97,16 +123,6 @@ void applyThreshold(uint8_t *data, size_t len, uint8_t threshold) {
 }
 
 // ---------- Analisis Distribusi Vertikal ----------
-// typedef struct {
-//   float topHalfRatio;      // Rasio piksel putih di setengah atas
-//   float bottomHalfRatio;   // Rasio piksel putih di setengah bawah
-//   float verticalSpread;    // Sebaran vertikal (tinggi objek)
-//   int centerOfMassY;       // Pusat massa vertikal (dalam piksel)
-//   bool isStanding;         // Status: berdiri atau tidak
-//   float confidence;        // Tingkat kepercayaan (0-100%)
-// }PostureAnalysis;
-
-// PostureAnalysis analyzePosture(uint8_t *data, int width, int height);
 PostureAnalysis analyzePosture(uint8_t *data, int width, int height) {
   PostureAnalysis result = {0};
   
@@ -199,6 +215,146 @@ PostureAnalysis analyzePosture(uint8_t *data, int width, int height) {
   return result;
 }
 
+// ---------- Simpan Frame ke History ----------
+void addFrameToHistory(PostureAnalysis posture) {
+  frameBuffer[frameIndex].centerOfMassY = posture.centerOfMassY;
+  frameBuffer[frameIndex].topHalfRatio = posture.topHalfRatio;
+  frameBuffer[frameIndex].bottomHalfRatio = posture.bottomHalfRatio;
+  frameBuffer[frameIndex].verticalSpread = posture.verticalSpread;
+  frameBuffer[frameIndex].timestamp = millis();
+  
+  frameIndex = (frameIndex + 1) % FRAME_HISTORY_SIZE;
+  if (frameCount < FRAME_HISTORY_SIZE) {
+    frameCount++;
+  }
+}
+
+// ---------- Analisis Tren Multi-Frame ----------
+PostureState analyzePostureTrend() {
+  if (frameCount < 3) {
+    return STATE_UNKNOWN;  // Belum cukup data
+  }
+  
+  // Hitung rata-rata COM Y dari frame terakhir
+  float avgCOMY = 0;
+  float avgBottomRatio = 0;
+  float avgVerticalSpread = 0;
+  
+  for (int i = 0; i < frameCount; i++) {
+    avgCOMY += frameBuffer[i].centerOfMassY;
+    avgBottomRatio += frameBuffer[i].bottomHalfRatio;
+    avgVerticalSpread += frameBuffer[i].verticalSpread;
+  }
+  
+  avgCOMY /= frameCount;
+  avgBottomRatio /= frameCount;
+  avgVerticalSpread /= frameCount;
+  
+  // Normalisasi COM Y ke persentase
+  float avgCOMYPercent = (avgCOMY / FRAME_HEIGHT) * 100;
+  
+  // Deteksi tren pergerakan COM Y
+  int trendDown = 0;  // Menghitung berapa kali COM bergerak ke bawah
+  for (int i = 1; i < frameCount; i++) {
+    int prevIdx = (frameIndex - frameCount + i - 1 + FRAME_HISTORY_SIZE) % FRAME_HISTORY_SIZE;
+    int currIdx = (frameIndex - frameCount + i + FRAME_HISTORY_SIZE) % FRAME_HISTORY_SIZE;
+    
+    if (frameBuffer[currIdx].centerOfMassY > frameBuffer[prevIdx].centerOfMassY) {
+      trendDown++;
+    }
+  }
+  
+  Serial.println("\n--- ANALISIS TREN MULTI-FRAME ---");
+  Serial.print("Frame yang dianalisis: ");
+  Serial.println(frameCount);
+  Serial.print("Avg COM Y: ");
+  Serial.print(avgCOMY, 1);
+  Serial.print(" px (");
+  Serial.print(avgCOMYPercent, 1);
+  Serial.println("%)");
+  Serial.print("Avg Bottom Ratio: ");
+  Serial.print(avgBottomRatio, 1);
+  Serial.println("%");
+  Serial.print("Avg Vertical Spread: ");
+  Serial.print(avgVerticalSpread, 1);
+  Serial.println("%");
+  Serial.print("Tren bergerak ke bawah: ");
+  Serial.print(trendDown);
+  Serial.print("/");
+  Serial.println(frameCount - 1);
+  
+  // === LOGIKA STATE MACHINE ===
+  
+  // KONDISI TIDUR/HORIZONTAL:
+  // 1. COM Y di bawah 50% (lebih ke bawah frame)
+  // 2. Bottom ratio tinggi (>65%)
+  // 3. Vertical spread rendah (<35%)
+  // 4. Tren bergerak ke bawah (mayoritas frame)
+  
+  if (avgCOMYPercent > 55 && avgBottomRatio > 65 && avgVerticalSpread < 35) {
+    Serial.println("→ POLA TIDUR TERDETEKSI");
+    return STATE_SLEEPING;
+  }
+  
+  // KONDISI BERDIRI:
+  // 1. COM Y di tengah (30-70%)
+  // 2. Vertical spread tinggi (>50%)
+  // 3. Distribusi merata
+  
+  if (avgCOMYPercent >= 30 && avgCOMYPercent <= 70 && avgVerticalSpread > 50) {
+    Serial.println("→ POLA BERDIRI TERDETEKSI");
+    return STATE_STANDING;
+  }
+  
+  // KONDISI TRANSISI:
+  // Ada perubahan signifikan dalam beberapa frame terakhir
+  
+  if (trendDown >= (frameCount - 1) / 2) {
+    Serial.println("→ TRANSISI KE POSISI HORIZONTAL");
+    return STATE_TRANSITIONING;
+  }
+  
+  Serial.println("→ STATUS TIDAK JELAS");
+  return STATE_UNKNOWN;
+}
+
+// ---------- Update State Machine ----------
+void updatePostureState(PostureState newState) {
+  if (newState != currentState) {
+    currentState = newState;
+    stateStartTime = millis();
+    
+    Serial.print("\n🔄 PERUBAHAN STATE: ");
+    switch (currentState) {
+      case STATE_STANDING:
+        Serial.println("BERDIRI");
+        break;
+      case STATE_TRANSITIONING:
+        Serial.println("TRANSISI");
+        break;
+      case STATE_SLEEPING:
+        Serial.println("TIDUR/HORIZONTAL");
+        Serial.println("⚠️⚠️⚠️ ALERT: STATUS TIDUR TERDETEKSI! ⚠️⚠️⚠️");
+        // Trigger aksi: kirim notifikasi, nyalakan alarm, dll
+        break;
+      case STATE_UNKNOWN:
+        Serial.println("TIDAK DIKETAHUI");
+        break;
+    }
+  }
+  
+  // Hitung durasi state saat ini
+  unsigned long stateDuration = (millis() - stateStartTime) / 1000;
+  Serial.print("Durasi state saat ini: ");
+  Serial.print(stateDuration);
+  Serial.println(" detik");
+  
+  // Alert jika tidur lebih dari 15 detik
+  if (currentState == STATE_SLEEPING && stateDuration > 15) {
+    Serial.println("🚨🚨🚨 PERINGATAN: Tidur >15 detik! 🚨🚨🚨");
+  }
+}
+
 // ---------- Deep Sleep Function ----------
 void goToDeepSleep(uint64_t sleep_seconds) {
   Serial.println("Masuk deep sleep...");
@@ -272,8 +428,8 @@ void processFrame(camera_fb_t *fb) {
   Serial.print(whiteRatio);
   Serial.println("%");
   
-  // === ANALISIS POSTUR ===
-  Serial.println("\n=== ANALISIS POSTUR ===");
+  // === ANALISIS POSTUR SINGLE FRAME ===
+  Serial.println("\n=== ANALISIS POSTUR (Frame Saat Ini) ===");
   PostureAnalysis posture = analyzePosture(fb->buf, FRAME_WIDTH, FRAME_HEIGHT);
   
   Serial.print("Distribusi Atas: ");
@@ -294,23 +450,27 @@ void processFrame(camera_fb_t *fb) {
   Serial.print((float)posture.centerOfMassY / FRAME_HEIGHT * 100, 1);
   Serial.println("%)");
   
-  Serial.print("\nStatus: ");
+  Serial.print("Status Frame: ");
   if (posture.isStanding) {
     Serial.println("BERDIRI");
   } else {
-    Serial.println("HORIZONTAL/JATUH");
+    Serial.println("HORIZONTAL");
   }
   
   Serial.print("Confidence: ");
   Serial.print(posture.confidence, 1);
   Serial.println("%");
-  Serial.println("========================\n");
   
-  // Trigger aksi jika terdeteksi jatuh
-  if (!posture.isStanding && posture.confidence > 30) {
-    Serial.println("⚠️ ALERT: Kemungkinan Tidur Terdeteksi!");
-    // Tambahkan aksi: kirim notifikasi, nyalakan alarm, dll
-  }
+  // Simpan ke history
+  addFrameToHistory(posture);
+  
+  // Analisis tren multi-frame
+  PostureState newState = analyzePostureTrend();
+  
+  // Update state machine
+  updatePostureState(newState);
+  
+  Serial.println("==========================================\n");
 }
 
 // ============================================================
@@ -318,32 +478,15 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   
-  // esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
-  // Serial.print("Wakeup cause: ");
-  // Serial.println(cause);
-  
   pinMode(WAKE_GPIO, INPUT);
   
   if (!initCamera()) {
     Serial.println("Camera gagal init, berhenti");
     while (1) delay(1000);
-    // goToDeepSleep(30);
   }
   
-  camera_fb_t *fb = esp_camera_fb_get();
-  if (!fb) {
-    Serial.println("Capture gagal");
-    // goToDeepSleep(30);
-  }
-  
-  processFrame(fb);
-  
-  esp_camera_fb_return(fb);
-
-  Serial.println("Camera siap. Mulai analisis...");
-  
-  // Tidur 60 detik atau sampai GPIO aktif
-  // goToDeepSleep(60);
+  Serial.println("Camera siap. Mulai analisis multi-frame...");
+  Serial.println("Mengumpulkan 3-5 frame untuk analisis tren...\n");
 }
 
 void loop() {
