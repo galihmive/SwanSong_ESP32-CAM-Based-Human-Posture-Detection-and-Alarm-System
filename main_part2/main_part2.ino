@@ -3,6 +3,8 @@
 HardwareSerial dfSerial(2); // UART2
 DFRobotDFPlayerMini dfplayer;
 
+const int vibrationPin = 25;   // GPIO25 untuk motor getar
+
 int playCount = 0;
 const int maxPlay = 5;
 bool isPlaying = false;
@@ -17,8 +19,19 @@ void softStartVolume(uint8_t targetVolume) {
   }
 }
 
+void startVibration() {
+  digitalWrite(vibrationPin, HIGH);
+}
+
+void stopVibration() {
+  digitalWrite(vibrationPin, LOW);
+}
+
 void setup() {
   Serial.begin(115200);
+
+  pinMode(vibrationPin, OUTPUT);
+  stopVibration();  // pastikan mati saat awal
 
   // RX = GPIO16, TX = GPIO17
   dfSerial.begin(9600, SERIAL_8N1, 16, 17);
@@ -32,11 +45,11 @@ void setup() {
 
   Serial.println("✅ DFPlayer siap");
 
-  softStartVolume(30);  // atau 18–22
-  dfplayer.play(3);      // mulai putaran pertama
+  softStartVolume(30);
+  dfplayer.play(3);
   isPlaying = true;
+  startVibration();   // getaran mulai
 }
-
 
 void loop() {
   if (dfplayer.available()) {
@@ -48,11 +61,13 @@ void loop() {
       Serial.println(playCount);
 
       if (playCount < maxPlay) {
-        delay(500);          // jeda kecil (opsional)
-        dfplayer.play(3);    // putar lagi
+        delay(500);
+        dfplayer.play(3);
+        startVibration();   // getaran aktif lagi untuk track berikutnya
       } else {
         Serial.println("🎵 Pemutaran selesai (5 kali)");
         isPlaying = false;
+        stopVibration();    // getaran mati total
       }
     }
   }
